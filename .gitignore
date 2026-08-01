@@ -1,0 +1,11 @@
+# Node environment ignores
+node_modules/
+.env
+.next/
+.DS_Store
+
+# Local env examples
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
