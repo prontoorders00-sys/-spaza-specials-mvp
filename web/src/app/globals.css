@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens */
+:root {
+  --ink: #14110F;
+  --panel: #1C1916;
+  --line: #2E2822;
+  --cream: #F5EEE3;
+  --dim: #8A7F6F;
+  --orange: #E85D2F;
+  --ochre: #E8A33C;
+  --grass: #3F7A4E;
+  --alert: #C4503A;
+}
+
+html, body, #__next {
+  height: 100%;
+}
+
+:focus {
+  outline: 3px solid var(--orange);
+  outline-offset: 2px;
+}
