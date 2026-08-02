@@ -15,7 +15,7 @@ the payment and the sale.
 
 ## Stack
 
-- Next.js 14 App Router + TypeScript, in `web/`
+- Next.js 15 App Router + TypeScript, in `web/`
 - Tailwind CSS
 - Supabase — Postgres, Auth, Row Level Security
 - Deployed on Vercel
@@ -44,6 +44,8 @@ Do not add a different framework, ORM, state library or UI kit. Ask first.
    only after that shop sends them a request, or explicitly opts in. This is a
    POPIA requirement, not a preference.
 10. **No `localStorage` or `sessionStorage`.**
+11. **Next.js is pinned to `^15.5.21` for security.** Do not downgrade to 14 —
+    the 14.x line has unpatched SSRF and DoS CVEs with no available fix.
 
 ## The thing that matters most
 
