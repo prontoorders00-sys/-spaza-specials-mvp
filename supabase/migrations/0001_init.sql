@@ -117,10 +117,8 @@ create index listings_wholesaler_idx on listings (wholesaler_id);
 create index listings_confirmed_idx on listings (confirmed_at);
 
 -- How stale is this price? Drives ranking and the "confirm prices" nudge.
-create or replace function listing_staleness_hours(l listings)
-returns numeric language sql immutable as $$
-  select extract(epoch from (now() - l.confirmed_at)) / 3600;
-$$;
+-- NOTE: not a function — staleness is computed inline in feed_for_shop
+--       to avoid marking now() as IMMUTABLE.
 
 -- Price history — powers price-drop alerts
 create table price_history (
@@ -132,19 +130,30 @@ create table price_history (
 
 create index price_history_listing_idx on price_history (listing_id, recorded_at desc);
 
-create or replace function record_price_change()
+create or replace function touch_listing_updated_at()
 returns trigger language plpgsql as $$
 begin
-  if (tg_op = 'INSERT') or (old.price_cents is distinct from new.price_cents) then
-    insert into price_history (listing_id, price_cents)
-    values (new.id, new.price_cents);
-  end if;
   new.updated_at := now();
   return new;
 end $$;
 
+create trigger listings_touch_updated_at
+  before update on listings
+  for each row execute function touch_listing_updated_at();
+
+create or replace function record_price_change()
+returns trigger language plpgsql as $$
+begin
+  if (tg_op = 'INSERT')
+     or (old.price_cents is distinct from new.price_cents) then
+    insert into price_history (listing_id, price_cents)
+    values (new.id, new.price_cents);
+  end if;
+  return null;
+end $$;
+
 create trigger listings_price_history
-  before insert or update on listings
+  after insert or update on listings
   for each row execute function record_price_change();
 
 -- Auto-expire specials past their end date
@@ -288,13 +297,14 @@ create table campaign_events (
   campaign_id  uuid not null references campaigns(id) on delete cascade,
   shop_id      uuid references shops(id) on delete set null,
   type         campaign_event_type not null,
-  created_at   timestamptz default now()
+  created_at   timestamptz default now(),
+  event_day    date generated always as (((created_at at time zone 'UTC')::date)) stored
 );
 
 create index campaign_events_idx on campaign_events (campaign_id, type);
 -- One impression per shop per campaign per day (don't inflate reach)
 create unique index campaign_events_impression_daily
-  on campaign_events (campaign_id, shop_id, (created_at::date))
+  on campaign_events (campaign_id, shop_id, event_day)
   where type = 'impression';
 
 alter table order_requests
@@ -358,7 +368,7 @@ returns table (
   pack_size text,
   price_cents integer,
   was_price_cents integer,
-  type listing_type,
+  listing_kind listing_type,
   ends_at timestamptz,
   wholesaler_name text,
   distance_km numeric,
@@ -366,37 +376,47 @@ returns table (
   is_sponsored boolean,
   score numeric
 ) language sql stable as $$
-  with shop as (select location from shops where id = p_shop_id)
+  with shop as (
+    select location as loc from shops where id = p_shop_id
+  ),
+  ranked as (
+    select
+      l.id                as r_listing_id,
+      p.name              as r_product_name,
+      p.pack_size         as r_pack_size,
+      l.price_cents       as r_price_cents,
+      l.was_price_cents   as r_was_price_cents,
+      l.type              as r_kind,
+      l.ends_at           as r_ends_at,
+      w.name              as r_wholesaler_name,
+      round((st_distance(w.location, shop.loc) / 1000)::numeric, 1) as r_distance_km,
+      round((extract(epoch from (now() - l.confirmed_at)) / 3600)::numeric) as r_staleness_hours,
+      (c.id is not null)  as r_is_sponsored,
+      (
+          (100 - least((st_distance(w.location, shop.loc) / 1000)::numeric, 50) * 1.5)
+        + (case when l.type = 'special' then 25 else 0 end)
+        - least((extract(epoch from (now() - l.confirmed_at)) / 3600)::numeric, 72) * 0.8
+        + (case when c.id is not null then 40 else 0 end)
+      )::numeric          as r_score
+    from listings l
+    join products p     on p.id = l.product_id
+    join wholesalers w  on w.id = l.wholesaler_id
+    cross join shop
+    left join campaigns c
+           on c.listing_id = l.id
+          and c.status = 'running'
+          and now() between c.starts_at and c.ends_at
+    where l.status = 'live'
+      and l.stock <> 'out'
+      and (l.ends_at is null or l.ends_at > now())
+      and st_dwithin(w.location, shop.loc, p_radius_km * 1000)
+  )
   select
-    l.id,
-    p.name,
-    p.pack_size,
-    l.price_cents,
-    l.was_price_cents,
-    l.type,
-    l.ends_at,
-    w.name,
-    round((st_distance(w.location, shop.location) / 1000)::numeric, 1),
-    round(extract(epoch from (now() - l.confirmed_at)) / 3600),
-    (c.id is not null),
-    -- ranking: closer + fresher + special + sponsored ranks higher
-      (100 - least(st_distance(w.location, shop.location) / 1000, 50) * 1.5)
-    + (case when l.type = 'special' then 25 else 0 end)
-    - least(extract(epoch from (now() - l.confirmed_at)) / 3600, 72) * 0.8
-    + (case when c.id is not null then 40 else 0 end)
-  from listings l
-  join products p     on p.id = l.product_id
-  join wholesalers w  on w.id = l.wholesaler_id
-  cross join shop
-  left join campaigns c
-         on c.listing_id = l.id
-        and c.status = 'running'
-        and now() between c.starts_at and c.ends_at
-  where l.status = 'live'
-    and l.stock <> 'out'
-    and (l.ends_at is null or l.ends_at > now())
-    and st_dwithin(w.location, shop.location, p_radius_km * 1000)
-  order by score desc
+    r_listing_id, r_product_name, r_pack_size, r_price_cents,
+    r_was_price_cents, r_kind, r_ends_at, r_wholesaler_name,
+    r_distance_km, r_staleness_hours, r_is_sponsored, r_score
+  from ranked
+  order by r_score desc
   limit p_limit;
 $$;
 
@@ -415,6 +435,7 @@ alter table order_request_items enable row level security;
 alter table campaigns          enable row level security;
 alter table campaign_events    enable row level security;
 alter table events             enable row level security;
+alter table price_history      enable row level security;
 
 -- Helper: does the current user own this wholesaler?
 create or replace function owns_wholesaler(w_id uuid)
@@ -441,6 +462,12 @@ create policy "wholesaler manages listings" on listings
 create policy "wholesaler manages campaigns" on campaigns
   for all using (owns_wholesaler(wholesaler_id))
   with check (owns_wholesaler(wholesaler_id));
+
+create policy "wholesaler reads own price history" on price_history
+  for select to authenticated using (
+    exists (select 1 from listings l
+             where l.id = listing_id and owns_wholesaler(l.wholesaler_id))
+  );
 
 -- Wholesaler sees only AGGREGATE campaign events, never raw shop identity.
 -- Reads go through the campaign_results view, not this table.
