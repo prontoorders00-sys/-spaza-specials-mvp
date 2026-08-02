@@ -1,7 +1,7 @@
 {
-  "/auth/callback/route": "/auth/callback",
   "/_not-found/page": "/_not-found",
-  "/page": "/",
+  "/auth/callback/route": "/auth/callback",
   "/wh/page": "/wh",
-  "/wh/login/page": "/wh/login"
+  "/wh/login/page": "/wh/login",
+  "/page": "/"
 }
